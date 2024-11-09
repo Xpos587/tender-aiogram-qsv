@@ -14,8 +14,13 @@ logger = logging.getLogger(__name__)
 @router.error(ExceptionTypeFilter(Exception))
 async def handle_some_error(error: ErrorEvent, i18n: I18nContext) -> Any:
     logger.error(
-        f"{error.exception} occurred at "
-        f"{error.exception.__traceback__.tb_frame.f_code.co_filename}:"
+        "Error details:\n"
+        f"Exception type: {type(error.exception)}\n"
+        f"Exception message: {str(error.exception)}\n"
+        f"Update type: {type(error.update)}\n"
+        f"Update content: {error.update}\n"
+        f"Occurred at: {
+            error.exception.__traceback__.tb_frame.f_code.co_filename}:"
         f"{error.exception.__traceback__.tb_lineno}"
     )
 

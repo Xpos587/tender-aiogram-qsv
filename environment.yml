@@ -7,7 +7,7 @@ dependencies:
   - python=3.12
   - pip
   - pip:
-      - aiogram
+      - aiogram=3.13.1
       - aiogram_i18n
       - alembic
       - asyncpg

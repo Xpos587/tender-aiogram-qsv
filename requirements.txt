@@ -1,0 +1,17 @@
+aiogram==3.13.1
+aiogram_i18n
+alembic
+asyncpg
+redis
+sqlalchemy
+msgspec
+pydantic
+pydantic_settings
+fluent_runtime
+types-pyyaml
+tzdata
+ipykernel
+ruff-lsp
+ruff
+black
+libcst
