@@ -1,6 +1,6 @@
 [tool.black]
 line-length = 80
-exclude = "\\.?venv|\\.?tests"
+exclude = "\\.?venv|\\.?tests|\\.micromamba"
 
 [tool.ruff]
 target-version = "py311"
@@ -35,6 +35,7 @@ exclude = [
     "build",
     "dist",
     "scripts",
+    ".micromamba",
 ]
 
 [tool.mypy]
@@ -48,6 +49,7 @@ exclude = [
     "build",
     "dist",
     "scripts",
+    ".micromamba",
 ]
 
 [[tool.mypy.overrides]]

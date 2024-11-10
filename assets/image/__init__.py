@@ -9,4 +9,7 @@ def load(path: str) -> FSInputFile:
     return FSInputFile(os.path.join(base_dir, path))
 
 
-start = load("start.jpg")
+start = load("start.png")
+help = load("help.png")
+settings = load("settings.png")
+checker = load("checker.png")

@@ -18,7 +18,9 @@ class UserManager(BaseManager):
         if user:
             return user.locale
         if event_from_user:
-            return event_from_user.language_code or cast(str, self.default_locale)
+            return event_from_user.language_code or cast(
+                str, self.default_locale
+            )
         return cast(str, self.default_locale)
 
     async def set_locale(

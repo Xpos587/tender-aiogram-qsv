@@ -95,7 +95,7 @@ async def show_validation_settings(
 
     return await query.message.edit_media(
         media=InputMediaPhoto(
-            media=image.start, caption=i18n.validation_settings()
+            media=image.settings, caption=i18n.validation_settings()
         ),
         reply_markup=reply_markup,
     )
@@ -137,7 +137,7 @@ async def process_link_start(
     await state.set_state(ChatStates.ReadyToRespond)
 
     return await query.message.edit_media(
-        media=InputMediaPhoto(media=image.start, caption=i18n.enter_link()),
+        media=InputMediaPhoto(media=image.checker, caption=i18n.enter_link()),
         reply_markup=common_keyboard(
             [Button(i18n.btn.cancel(), callback_data=cbd.main)]
         ),

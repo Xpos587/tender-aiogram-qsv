@@ -24,6 +24,6 @@ async def help_command(
     )
 
     return await query.message.edit_media(
-        InputMediaPhoto(media=image.start, caption=i18n.help()),
+        InputMediaPhoto(media=image.help, caption=i18n.help()),
         reply_markup=reply_markup,
     )

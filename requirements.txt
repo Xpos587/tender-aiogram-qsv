@@ -16,3 +16,6 @@ ruff
 black
 libcst
 pymupdf4llm
+scipy
+sentence-transformers
+Levenshtein

@@ -10,7 +10,9 @@ from utils.loggers import MultilineLogger
 
 async def polling_startup(bots: list[Bot]) -> None:
     for bot in bots:
-        await bot.delete_webhook(drop_pending_updates=settings.drop_pending_updates)
+        await bot.delete_webhook(
+            drop_pending_updates=settings.drop_pending_updates
+        )
     if settings.drop_pending_updates:
         loggers.dispatcher.info("Updates skipped successfully")
 
@@ -26,7 +28,9 @@ async def webhook_startup(dispatcher: Dispatcher, bot: Bot) -> None:
         return loggers.webhook.info(
             "Main bot webhook successfully set on url '%s'", url
         )
-    return loggers.webhook.error("Failed to set main bot webhook on url '%s'", url)
+    return loggers.webhook.error(
+        "Failed to set main bot webhook on url '%s'", url
+    )
 
 
 async def webhook_shutdown(bot: Bot) -> None:

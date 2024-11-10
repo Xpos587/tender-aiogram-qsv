@@ -1,3 +1,15 @@
+from scipy.spatial.distance import cosine
+import Levenshtein
+import torch
+from sentence_transformers import SentenceTransformer
+from transformers import (
+    pipeline,
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+)
+import numpy as np
+from typing import List, Tuple
+import logging
 import aiohttp
 import asyncio
 from typing import List, Dict, Optional
@@ -95,6 +107,7 @@ class TenderData(BaseModel):
     start_cost: float = Field(..., alias="startCost")
     next_cost: Optional[float] = Field(None, alias="nextCost")
     last_bet_cost: Optional[float] = Field(None, alias="lastBetCost")
+    contract_cost: Optional[float] = Field(None, alias="contractCost")
     step: float
     auction_item: List[AuctionItem] = Field(..., alias="auctionItem")
     bets: List[Bet]
@@ -121,6 +134,9 @@ class TenderData(BaseModel):
         None, alias="contractGuaranteeAmount"
     )
     is_license_production: bool = Field(..., alias="isLicenseProduction")
+    upload_license_documents_comment: Optional[str] = Field(
+        None, alias="uploadLicenseDocumentsComment"
+    )
     name: str
     id: int
 
@@ -166,7 +182,7 @@ class TenderParser:
                     # Прямое преобразование PDF в Markdown
                     return pymupdf4llm.to_markdown(temp_input_path)
 
-                elif ext in ("doc", "docx"):
+                elif ext in ("doc", "docx", "xlsx"):
                     # Конвертация в PDF с помощью LibreOffice
                     process = await asyncio.create_subprocess_exec(
                         "libreoffice",
@@ -249,7 +265,7 @@ class TenderParser:
                     for file in tender.files:
                         file.content = await self.get_file_bytes(file.id)
                         if file.content and file.name.lower().endswith(
-                            (".doc", ".docx", ".pdf")
+                            (".doc", ".docx", ".xlsx", ".pdf")
                         ):
                             markdown_content = (
                                 await self.convert_doc_to_markdown(
@@ -262,62 +278,426 @@ class TenderParser:
             return tenders
 
 
+logger = logging.getLogger(__name__)
+
+# Константы для моделей
+QA_MODEL_NAME = "timpal0l/mdeberta-v3-base-squad2"
+EMBEDDINGS_MODEL_NAME = "sergeyzh/rubert-tiny-turbo"
+ZERO_SHOT_MODEL_NAME = "cointegrated/rubert-base-cased-nli-threeway"
+
+# Определение устройства
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logger.info(f"Using device: {DEVICE}")
+
+# Инициализация моделей
+qa_model = pipeline(
+    "question-answering",
+    QA_MODEL_NAME,
+    device=0 if torch.cuda.is_available() else -1,
+)
+embeddings_model = SentenceTransformer(EMBEDDINGS_MODEL_NAME).to(DEVICE)
+zero_shot_tokenizer = AutoTokenizer.from_pretrained(ZERO_SHOT_MODEL_NAME)
+zero_shot_model = AutoModelForSequenceClassification.from_pretrained(
+    ZERO_SHOT_MODEL_NAME
+).to(DEVICE)
+
+# Константы для проверок
+SIMILARITY_THRESHOLD_HIGH = 0.93
+SIMILARITY_THRESHOLD_LOW = 0.8
+CER_THRESHOLD_HIGH = 0.97
+CER_THRESHOLD_LOW = 0.8
+ZERO_SHOT_THRESHOLD = 0.95
+DOCUMENT_NAMES = ["техническом задании", "контракте"]
+
+
+def calculate_character_error_rate(reference: str, hypothesis: str) -> float:
+    """Вычисляет нормализованное расстояние Левенштейна между строками"""
+    char_lev_dist = Levenshtein.distance(reference, hypothesis)
+    return char_lev_dist / max(len(reference), len(hypothesis))
+
+
+def predict_zero_shot(
+    text: str,
+    label_texts: List[str],
+    model: AutoModelForSequenceClassification,
+    tokenizer: AutoTokenizer,
+    label: str = "entailment",
+    normalize: bool = True,
+) -> np.ndarray:
+    """Выполняет zero-shot классификацию текста"""
+    tokens = tokenizer(
+        [text] * len(label_texts),
+        label_texts,
+        truncation=True,
+        return_tensors="pt",
+        padding=True,
+    )
+    # Перемещаем токены на нужное устройство
+    tokens = {k: v.to(DEVICE) for k, v in tokens.items()}
+
+    with torch.inference_mode():
+        result = torch.softmax(model(**tokens).logits, -1)
+    proba = result[:, model.config.label2id[label]].cpu().numpy()
+    if normalize:
+        proba /= sum(proba)
+    return proba
+
+
 class TenderValidator:
-    tender: TenderData
+    def _classify_documents(self) -> Tuple[List[bool], List[bool]]:
+        """Классифицирует документы, определяя технические задания и контракты"""
+        tech_specs = []
+        contracts = []
+
+        for file in self.tender.files:
+            text = file.content.lower()
+            text = text.replace("__", "").replace("  ", "")
+            first_sentences = " ".join(text.split("\n")[:10])
+            filename = file.name.lower()
+
+            # Определение ТЗ по имени или содержимому
+            is_tech_spec = (
+                ("техническ" in filename and "задан" in filename)
+                or ("тз" in filename)
+                or (
+                    "техническ" in first_sentences
+                    and "задан" in first_sentences
+                )
+            )
+            tech_specs.append(is_tech_spec)
+
+            # Определение контракта по имени или содержимому
+            is_contract = ("контракт" in filename or "договор" in filename) or (
+                ("контракт" in first_sentences or "договор" in first_sentences)
+                and (
+                    "предмет" in first_sentences or "стороны" in first_sentences
+                )
+            )
+            contracts.append(is_contract)
+
+            logger.debug(
+                f"Document '{file.name}': "
+                f"{'is' if is_tech_spec else 'is not'} technical specification, "
+                f"{'is' if is_contract else 'is not'} contract"
+            )
+
+        return tech_specs, contracts
+
+    def _get_technical_task(self) -> List[str]:
+        """Извлекает содержимое технического задания"""
+        tech_spec_idx = (
+            self.tech_spec_indices.index(True)
+            if True in self.tech_spec_indices
+            else 1
+        )
+        text = self.tender.files[tech_spec_idx].content
+        text = text.replace("__", "").replace("  ", "")
+        return [
+            sentence.strip()
+            for sentence in text.split("\n")
+            if sentence.strip()
+        ]
+
+    def _get_contract(self) -> List[str]:
+        """Извлекает содержимое контракта"""
+        contract_idx = (
+            self.contract_indices.index(True)
+            if True in self.contract_indices
+            else 0
+        )
+        text = self.tender.files[contract_idx].content
+        text = text.replace("__", "").replace("  ", "")
+        return [
+            sentence.strip()
+            for sentence in text.split("\n")
+            if sentence.strip()
+        ]
 
     def __init__(self, tender: TenderData):
+        self.qa_model = qa_model
+        self.embeddings_model = embeddings_model
+        self.zero_shot_tokenizer = zero_shot_tokenizer
+        self.zero_shot_model = zero_shot_model
         self.tender = tender
+
+        # Классификация документов
+        self.tech_spec_indices, self.contract_indices = (
+            self._classify_documents()
+        )
+
+        if not any(self.tech_spec_indices):
+            logger.warning("1️⃣ Техническое задание не найдено в документах")
+        if not any(self.contract_indices):
+            logger.warning("2️⃣ Контракт не найден в документах")
+
+        # Получение документов
         self.technical_task = self._get_technical_task()
         self.contract = self._get_contract()
 
-    def _get_technical_task(self):
-        """Заглушка для получения ТЗ"""
-        # Здесь можно будет реализовать логику извлечения ТЗ из файлов
-        return None
-
-    def _get_contract(self):
-        """Заглушка для получения проекта контракта"""
-        # Здесь можно будет реализовать логику извлечения контракта из файлов
-        return None
-
     def validate_name(self) -> bool:
-        """
-        1. Проверка соответствия наименования закупки.
-        Заглушка: возвращает всегда False.
-        """
-        return False
+        """Проверяет соответствие наименования в документах"""
+        name_matches = False
+
+        for doc_idx, doc_text in enumerate(
+            [self.technical_task, self.contract]
+        ):
+            doc_content = ". ".join(doc_text[:7])
+            extracted_name = self.qa_model(
+                question="Какое Наименование закупки?", context=doc_content
+            )["answer"]
+
+            cer_score = calculate_character_error_rate(
+                self.tender.name, extracted_name
+            )
+            embeddings = self.embeddings_model.encode(
+                [self.tender.name, extracted_name]
+            )
+            similarity_score = (
+                1 - cosine(embeddings[0], embeddings[1]) + 1
+            ) / 2
+
+            if (
+                cer_score > CER_THRESHOLD_HIGH
+                and similarity_score > SIMILARITY_THRESHOLD_HIGH
+            ):
+                name_matches = True
+            elif (
+                similarity_score > SIMILARITY_THRESHOLD_LOW
+                and cer_score > CER_THRESHOLD_LOW
+            ):
+                name_matches = True
+                logger.warning(
+                    f"Частичное несоответствие наименования в {
+                        DOCUMENT_NAMES[doc_idx]}"
+                )
+
+        return name_matches
 
     def validate_contract_guarantee(self) -> bool:
         """
-        2. Проверка требования обеспечения контракта.
-        Заглушка: возвращает всегда False.
+        Проверяет наличие требований об обеспечении контракта в документах.
+        Выполняется только если обеспечение контракта требуется.
         """
-        return False
+        if not self.tender.is_contract_guarantee_required:
+            return True
+
+        GUARANTEE_KEYWORDS = ["требуе", "исполн", "контракт"]
+        GUARANTEE_CLASSES = [
+            "Требуется обеспечение исполнения контракта",
+            "Другое",
+        ]
+        PROBABILITY_THRESHOLD = 0.95
+
+        guarantee_mentioned = False
+
+        for doc_idx, doc_text in enumerate(
+            [self.technical_task, self.contract]
+        ):
+            matching_sentences = []
+            for sentence in doc_text:
+                sentence_lower = sentence.lower()
+                has_requirement = GUARANTEE_KEYWORDS[0] in sentence_lower
+                has_execution = GUARANTEE_KEYWORDS[1] in sentence_lower
+                has_contract = GUARANTEE_KEYWORDS[2] in sentence_lower
+
+                if (
+                    (has_requirement and has_contract)
+                    or (has_execution and has_contract)
+                    or (has_requirement and has_execution and has_contract)
+                ):
+                    matching_sentences.append(sentence.strip())
+
+            for sentence in matching_sentences:
+                probability = predict_zero_shot(
+                    sentence,
+                    GUARANTEE_CLASSES,
+                    self.zero_shot_model,
+                    self.zero_shot_tokenizer,
+                )[0]
+
+                if probability > PROBABILITY_THRESHOLD:
+                    guarantee_mentioned = True
+                    break
+
+            if not guarantee_mentioned:
+                logger.warning(
+                    f"Требование об обеспечении контракта не найдено в {
+                        DOCUMENT_NAMES[doc_idx]}"
+                )
+
+        return guarantee_mentioned
 
     def validate_certificates(self) -> bool:
         """
-        3. Проверка требований к сертификатам/лицензиям.
-        Заглушка: возвращает всегда False.
+        Проверяет наличие требований к лицензиям/сертификатам.
+        Выполняется только если требуются лицензии.
         """
-        return False
+        if not self.tender.is_license_production:
+            return True
+
+        WORD_MATCH_THRESHOLD = 0.7
+        certificates_mentioned = False
+
+        license_comment = self.tender.upload_license_documents_comment
+        question = (
+            "Какая лицензия?"
+            if "лиценз" in license_comment.lower()
+            else "Какой сертификат?"
+        )
+
+        answer = self.qa_model(question=question, context=license_comment)[
+            "answer"
+        ]
+
+        keywords = [
+            word[: len(word) - 2] for word in answer.split() if len(word) > 6
+        ]
+        required_matches = len(answer.split())
+
+        for doc_idx, doc_text in enumerate(
+            [self.technical_task, self.contract]
+        ):
+            doc_contains_certificates = False
+
+            for sentence in doc_text:
+                sentence_lower = sentence.lower()
+                matching_words = sum(
+                    1 for word in keywords if word in sentence_lower
+                )
+
+                if matching_words / required_matches > WORD_MATCH_THRESHOLD:
+                    certificates_mentioned = True
+                    doc_contains_certificates = True
+                    break
+
+            if not doc_contains_certificates:
+                logger.warning(
+                    f"Требования к сертификатам/лицензиям не найдены в {
+                        DOCUMENT_NAMES[doc_idx]}"
+                )
+
+        return certificates_mentioned
 
     def validate_delivery_schedule(self) -> bool:
-        """
-        4. Проверка графика и этапов поставки.
-        Заглушка: возвращает всегда False.
-        """
-        return False
+        """Проверяет соответствие графика поставки в документах"""
+        DELIVERY_KEYWORDS = ["срок", "этап", "график"]
+        DELIVERY_CLASSES = ["дата поставки", "другое"]
+        PROBABILITY_THRESHOLD = 0.75
+
+        delivery = self.tender.deliveries[0]
+        schedule_mentioned = False
+
+        if delivery.period_days_from is None:
+            key_dates = [
+                delivery.period_date_from[0:2],
+                delivery.period_date_from[3:5],
+                delivery.period_date_to[0:2],
+                delivery.period_date_to[3:5],
+            ]
+        else:
+            key_dates = [delivery.period_days_from, delivery.period_days_from]
+
+        for doc_idx, doc_text in enumerate(
+            [self.technical_task, self.contract]
+        ):
+            matching_sentences = []
+
+            for sentence in doc_text:
+                sentence_lower = sentence.lower()
+                has_dates = any(
+                    str(date) in sentence_lower for date in key_dates
+                )
+                has_keywords = any(
+                    keyword in sentence_lower for keyword in DELIVERY_KEYWORDS
+                )
+
+                if has_dates and has_keywords:
+                    matching_sentences.append(sentence.strip())
+
+            for sentence in matching_sentences:
+                probability = predict_zero_shot(
+                    sentence,
+                    DELIVERY_CLASSES,
+                    self.zero_shot_model,
+                    self.zero_shot_tokenizer,
+                )[0]
+
+                if probability > PROBABILITY_THRESHOLD:
+                    schedule_mentioned = True
+                    break
+
+            if not schedule_mentioned:
+                logger.warning(
+                    f"График поставки не найден в {DOCUMENT_NAMES[doc_idx]}"
+                )
+
+        return schedule_mentioned
 
     def validate_price(self) -> bool:
-        """
-        5. Проверка цены контракта.
-        Заглушка: возвращает всегда False.
-        """
-        return False
+        """Проверяет указание цены контракта в документах"""
+        contract_price = False
+        try:
+            contract_price = str(round(self.tender.contract_cost))
+        except:
+            pass
+        price_mentioned = False
+        for doc_idx, doc_text in enumerate(
+            [self.technical_task, self.contract]
+        ):
+            doc_contains_price = False
+
+            for sentence in doc_text:
+                if contract_price != False:
+                    if contract_price in sentence.lower():
+                        price_mentioned = True
+                        doc_contains_price = True
+                        break
+                else:
+                    if "цена контракта" in sentence.lower():
+                        price_mentioned = True
+                        doc_contains_price = True
+                        break
+
+            if not doc_contains_price:
+                if contract_price != False:
+                    logger.warning(
+                        f"Максимальная цена контракта не найдена в {
+                            DOCUMENT_NAMES[doc_idx]}"
+                    )
+                else:
+                    logger.warning(
+                        f"Начальная цена контракта не найдена в {
+                            DOCUMENT_NAMES[doc_idx]}"
+                    )
+
+        return price_mentioned
 
     def validate_specifications(self) -> bool:
-        """
-        6. Проверка спецификаций в техническом задании.
-        Заглушка: возвращает всегда False.
-        """
-        return False
+        """Проверяет наличие спецификаций товаров в техническом задании"""
+        found_items = 0
+
+        for item in self.tender.items:
+            answer = self.qa_model(
+                question="Наименование товара", context=item.name
+            )["answer"]
+
+            keywords = [word.lower() for word in answer.split()]
+            item_found = False
+
+            for sentence in self.technical_task:
+                sentence_lower = sentence.lower()
+                matching_words = sum(
+                    1 for word in keywords if word in sentence_lower
+                )
+
+                if matching_words == len(keywords):
+                    found_items += 1
+                    item_found = True
+                    break
+
+            if not item_found:
+                logger.warning(
+                    f'Товар "{item.name}" не найден в техническом задании'
+                )
+
+        return found_items == len(self.tender.items)

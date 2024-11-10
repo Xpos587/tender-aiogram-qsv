@@ -79,7 +79,8 @@ class RetryRequestMiddleware(BaseRequestMiddleware):
                 if retries == self.max_retries:
                     raise
                 logger.error(
-                    "Request '%s' failed due to rate limit." "Sleeping %s seconds.",
+                    "Request '%s' failed due to rate limit."
+                    "Sleeping %s seconds.",
                     type(method).__name__,
                     e.retry_after,
                 )
