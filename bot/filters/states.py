@@ -6,6 +6,8 @@ from aiogram.fsm.state import State, StatesGroup
 
 class ChatStates(StatesGroup):
     ReadyToRespond = State()
+    ValidationSettings = State()
+    WaitingForLink = State()
 
 
 NoneState: Final[Filter] = StateFilter(None)

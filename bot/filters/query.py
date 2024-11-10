@@ -8,6 +8,9 @@ from aiogram.filters import BaseFilter
 class CallbackData(StrEnum):
     main: Final[auto] = auto()
     help: Final[auto] = auto()
+    check_link: Final[auto] = auto()
+    toggle_rule: Final[auto] = auto()
+    validation_settings: Final[auto] = auto()
 
     def __call__(self, *args: Any, **kwargs: Any) -> BaseFilter:
         """Create a filter for callback data."""

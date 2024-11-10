@@ -17,8 +17,6 @@ async def help_command(
     i18n: I18nContext,
     state: FSMContext,
 ) -> Any:
-    await state.clear()
-
     reply_markup = common_keyboard(
         rows=[
             Button(i18n.btn.back(), callback_data=cbd.main),
@@ -26,6 +24,6 @@ async def help_command(
     )
 
     return await query.message.edit_media(
-        InputMediaPhoto(media=image.start, caption=i18n.start()),
+        InputMediaPhoto(media=image.start, caption=i18n.help()),
         reply_markup=reply_markup,
     )

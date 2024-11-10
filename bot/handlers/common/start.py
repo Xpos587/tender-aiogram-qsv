@@ -19,17 +19,31 @@ async def start_command(
     i18n: I18nContext,
     state: FSMContext,
 ) -> Any:
+    # Получаем текущие настройки валидации из состояния
+    data = await state.get_data()
+    validation_conditions = data.get("validation_conditions")
+
+    # Очищаем состояние и восстанавливаем настройки валидации
     await state.clear()
+    if validation_conditions:
+        await state.update_data(validation_conditions=validation_conditions)
 
     reply_markup = common_keyboard(
         rows=[
             (
+                Button(i18n.btn.check_link(), callback_data=cbd.check_link),
+                Button(
+                    i18n.btn.validation_settings(),
+                    callback_data=cbd.validation_settings,
+                ),
+            ),
+            (
                 Button(i18n.btn.help(), callback_data=cbd.help),
                 Button(
                     i18n.btn.source(),
-                    url="https://github.com/tender-aiogram-qsv",
+                    url="https://github.com/xpos587/tender-aiogram-qsv",
                 ),
-            )
+            ),
         ]
     )
 
@@ -41,6 +55,6 @@ async def start_command(
         )
 
     message = object
-    return message.answer_photo(
+    return await message.answer_photo(
         photo=image.start, caption=i18n.start(), reply_markup=reply_markup
     )
