@@ -1,12 +1,12 @@
 import re
 import logging
-from typing import Any, Final, List
+from typing import Any, Final, List, Tuple
 from aiogram import Router
 from aiogram.types import CallbackQuery, Message, InputMediaPhoto
 from aiogram.fsm.context import FSMContext
 from aiogram_i18n import I18nContext
 from assets import image
-from services.validator import TenderParser, TenderValidator
+from services.validator import TenderParser, TenderValidator, TenderData
 
 from bot.filters import CallbackData as cbd, ChatStates
 from bot.keyboards import Button, common_keyboard
@@ -33,13 +33,13 @@ def extract_tender_ids(text: str) -> List[int]:
 
 async def validate_tenders(
     tender_ids: List[int], conditions: dict
-) -> List[dict]:
+) -> Tuple[List[dict], List[TenderData]]:
     """Выполняет валидацию нескольких тендеров согласно настроенным условиям"""
     parser = TenderParser()
     tenders = await parser.process_tenders(tender_ids, get_files=True)
 
     if not tenders:
-        return []
+        return [], []
 
     validation_methods = {
         "name": lambda v: v.validate_name(),
@@ -59,9 +59,14 @@ async def validate_tenders(
             if enabled and key in validation_methods:
                 tender_results[text_key] = validation_methods[key](validator)
 
-        results.append({"tender_id": tender.id, "results": tender_results})
+        results.append(
+            {
+                "tender_id": tender.id,
+                "results": tender_results,
+            }
+        )
 
-    return results
+    return results, tenders
 
 
 @router.callback_query(cbd.validation_settings())
@@ -70,6 +75,8 @@ async def show_validation_settings(
     i18n: I18nContext,
     state: FSMContext,
 ) -> Any:
+    await state.set_state(ChatStates.ValidationSettings)
+
     data = await state.get_data()
     conditions = data.get("validation_conditions", VALIDATION_CONDITIONS.copy())
 
@@ -173,7 +180,9 @@ async def process_links(
         conditions = data.get(
             "validation_conditions", VALIDATION_CONDITIONS.copy()
         )
-        validation_results = await validate_tenders(tender_ids, conditions)
+        validation_results, tenders = await validate_tenders(
+            tender_ids, conditions
+        )
 
         if not validation_results:
             await message.answer(
@@ -184,20 +193,33 @@ async def process_links(
             )
             return
 
+        await status_message.delete()
+
         for result in validation_results:
+            tender = next(t for t in tenders if t.id == result["tender_id"])
             tender_id = str(result["tender_id"]).replace(" ", "")
+
             validation_text = "\n".join(
                 f"{i18n.get(key)}: {'✅' if value else '❌'}"
                 for key, value in result["results"].items()
             )
 
+            # Добавляем причину снятия, если есть
+            unpublish_reason = ""
+            if tender.unpublish_name or tender.conclusion_reason_name:
+                reason = tender.unpublish_name or tender.conclusion_reason_name
+                unpublish_reason = i18n.unpublish_reason(reason=reason)
+
             await message.answer(
                 i18n.tender_validation(
-                    tender_id=tender_id, results=validation_text
+                    tender_id=tender_id,
+                    unpublish_reason=unpublish_reason,
+                    results=validation_text,
                 ),
                 reply_markup=common_keyboard(
                     [Button(i18n.btn.back(), callback_data=cbd.main)]
                 ),
+                parse_mode="HTML",
             )
 
     except Exception as e:
@@ -206,12 +228,17 @@ async def process_links(
             message.from_user.id,
             str(e),
         )
+        if status_message:
+            await status_message.delete()
         await message.answer(
             i18n.validation_error(),
             reply_markup=common_keyboard(
                 [Button(i18n.btn.back(), callback_data=cbd.main)]
             ),
         )
-
     finally:
+        validation_conditions = data.get("validation_conditions")
+        await state.clear()
+        if validation_conditions:
+            await state.update_data(validation_conditions=validation_conditions)
         await state.update_data(is_processing=False)

@@ -80,8 +80,11 @@ processing_in_progress =
 
     Пожалуйста, дождитесь завершения текущей проверки.
 
-tender_validation =
-    📋 Результаты проверки тендера <a href='https://zakupki.mos.ru/auction/{$tender_id}'>№{$tender_id}</a>
+tender_validation = 📋 Результаты проверки тендера №<a href='https://zakupki.mos.ru/auction/{$tender_id}'>№{$tender_id}</a>
+
+    {$unpublish_reason}
 
     {$results}
+
+unpublish_reason = ❗️ Причина снятия: {$reason}
 
