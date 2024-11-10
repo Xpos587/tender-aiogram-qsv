@@ -79,4 +79,3 @@ MIT
 
 - [Michael](https://github.com/xpos587)
 
-[self-reviewed]i
